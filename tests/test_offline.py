@@ -103,9 +103,74 @@ class TestLLMAdapter(unittest.TestCase):
         import os
         os.environ.pop("LLM_API_KEY", None)
         os.environ.pop("OPENAI_API_KEY", None)
+        os.environ.pop("GEMINI_API_KEY", None)
         nar, source = _llm_note("t", "역할", 50.0, "중립", "facts", lambda e: None)
         self.assertIsNone(nar)
         self.assertEqual(source, "rule")
+
+
+class TestLLMGeminiDetection(unittest.TestCase):
+    """GEMINI_API_KEY / AIza 프리픽스 감지 → 엔드포인트·기본 모델 자동 구성."""
+
+    def _client_with_env(self, **env):
+        import os
+        saved = {}
+        keys = ("GEMINI_API_KEY", "LLM_API_KEY", "OPENAI_API_KEY", "LLM_BASE_URL", "LLM_MODEL")
+        for k in keys:
+            saved[k] = os.environ.pop(k, None)
+        try:
+            for k, v in env.items():
+                if v is not None:
+                    os.environ[k] = v
+            from core.llm import LLMClient
+            return LLMClient()
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+    def test_gemini_key_sets_gemini_endpoint_and_model(self):
+        c = self._client_with_env(GEMINI_API_KEY="AIzaSyTest123")
+        self.assertTrue(c.is_gemini)
+        self.assertEqual(c.api_key, "AIzaSyTest123")
+        self.assertEqual(c.base_url, "https://generativelanguage.googleapis.com/v1beta/openai")
+        self.assertEqual(c.model, "gemini-1.5-flash")
+
+    def test_llm_key_with_aiza_prefix_detected_as_gemini(self):
+        c = self._client_with_env(LLM_API_KEY="AIzaSyABC-def_123")
+        self.assertTrue(c.is_gemini)
+        self.assertEqual(c.api_key, "AIzaSyABC-def_123")
+        self.assertEqual(c.base_url, "https://generativelanguage.googleapis.com/v1beta/openai")
+        self.assertEqual(c.model, "gemini-1.5-flash")
+
+    def test_explicit_base_url_and_model_win_over_gemini_defaults(self):
+        c = self._client_with_env(
+            GEMINI_API_KEY="AIzaSyTest123",
+            LLM_BASE_URL="https://custom.example/v1/",
+            LLM_MODEL="gemini-2.0-flash",
+        )
+        self.assertTrue(c.is_gemini)
+        self.assertEqual(c.base_url, "https://custom.example/v1")
+        self.assertEqual(c.model, "gemini-2.0-flash")
+
+    def test_openai_key_keeps_existing_defaults(self):
+        c = self._client_with_env(LLM_API_KEY="sk-openai-test")
+        self.assertFalse(c.is_gemini)
+        self.assertEqual(c.api_key, "sk-openai-test")
+        self.assertEqual(c.base_url, "https://api.openai.com/v1")
+        self.assertEqual(c.model, "gpt-4o-mini")
+
+    def test_gemini_key_takes_precedence_over_llm_key(self):
+        c = self._client_with_env(GEMINI_API_KEY="AIzaSyGemini", LLM_API_KEY="sk-openai")
+        self.assertTrue(c.is_gemini)
+        self.assertEqual(c.api_key, "AIzaSyGemini")
+
+    def test_openai_key_wins_when_gemini_key_absent(self):
+        c = self._client_with_env(LLM_API_KEY="sk-openai", OPENAI_API_KEY="sk-other")
+        self.assertFalse(c.is_gemini)
+        self.assertEqual(c.api_key, "sk-openai")
 
 
 class TestAgentChain(unittest.TestCase):

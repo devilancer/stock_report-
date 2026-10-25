@@ -1,11 +1,18 @@
 """LLM adapter — optional OpenAI-compatible chat completions.
 
 환경변수로 설정 (모두 선택 사항):
-  LLM_BASE_URL   OpenAI 호환 엔드포인트 (기본 https://api.openai.com/v1)
-  LLM_API_KEY    API 키 (미설정 시 LLM 비활성 → 규칙 기반 코멘티로 폴백)
+  GEMINI_API_KEY  Google Gemini API 키 (AIza...). 설정 시 Gemini 사용.
+  LLM_BASE_URL   OpenAI 호환 엔드포인트 (기본 https://api.openai.com/v1,
+                 Gemini 감지 시 https://generativelanguage.googleapis.com/v1beta/openai)
+  LLM_API_KEY    API 키 (미설정 시 LLM 비활성 → 규칙 기반 코멘티로 폴백).
+                 `AIza` 로 시작하면 Gemini 키로 자동 감지.
   OPENAI_API_KEY LLM_API_KEY 대체 키
-  LLM_MODEL      모델명 (기본 gpt-4o-mini)
+  LLM_MODEL      모델명 (기본 gpt-4o-mini, Gemini 감지 시 gemini-1.5-flash)
   LLM_TIMEOUT    요청 타임아웃 초 (기본 45)
+
+Gemini 자동 감지: GEMINI_API_KEY 가 설정되어 있거나 LLM_API_KEY 가 `AIza` 로
+시작하면 Google Gemini(공식 OpenAI 호환 엔드포인트)로 자동 전환합니다.
+명시적인 LLM_BASE_URL / LLM_MODEL 이 있으면 그 값이 우선합니다.
 
 설계 원칙: 수치/점수/판단은 결정론적으로 계산하고, LLM은 서술(코멘티)만 생성한다.
 """
@@ -18,12 +25,25 @@ import time
 
 import requests
 
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
+GEMINI_DEFAULT_MODEL = "gemini-1.5-flash"
+OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
+OPENAI_DEFAULT_MODEL = "gpt-4o-mini"
+_GEMINI_KEY_PREFIX = "AIza"
+
 
 class LLMClient:
     def __init__(self) -> None:
-        self.base_url = os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-        self.api_key = os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
-        self.model = os.environ.get("LLM_MODEL", "gpt-4o-mini")
+        gemini_key = os.environ.get("GEMINI_API_KEY")
+        llm_key = os.environ.get("LLM_API_KEY")
+        self.api_key = gemini_key or llm_key or os.environ.get("OPENAI_API_KEY")
+        self.is_gemini = bool(gemini_key) or (
+            bool(llm_key) and llm_key.startswith(_GEMINI_KEY_PREFIX)
+        )
+        default_base_url = GEMINI_BASE_URL if self.is_gemini else OPENAI_DEFAULT_BASE_URL
+        default_model = GEMINI_DEFAULT_MODEL if self.is_gemini else OPENAI_DEFAULT_MODEL
+        self.base_url = os.environ.get("LLM_BASE_URL", default_base_url).rstrip("/")
+        self.model = os.environ.get("LLM_MODEL", default_model)
         self.timeout = float(os.environ.get("LLM_TIMEOUT", "45"))
 
     @property
