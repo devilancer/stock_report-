@@ -13,7 +13,7 @@ services:
       # LLM_API_KEY: ${LLM_API_KEY}      # 비밀값은 env_file로 관리하세요
       LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
       LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com/v1}
-      LLM_TIMEOUT: ${LLM_TIMEOUT:-45}
+      LLM_TIMEOUT: ${LLM_TIMEOUT:-25}
     logging:
       driver: json-file
       options:

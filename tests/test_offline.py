@@ -274,21 +274,21 @@ class TestLLMGeminiDetection(unittest.TestCase):
         self.assertTrue(c.is_gemini)
         self.assertEqual(c.api_key, "AIzaSyTest123")
         self.assertEqual(c.base_url, "https://generativelanguage.googleapis.com/v1beta/openai")
-        self.assertEqual(c.model, "gemini-3.8-flash")
+        self.assertEqual(c.model, "gemini-3.5-flash-lite")
 
     def test_llm_key_with_aiza_prefix_detected_as_gemini(self):
         c = self._client_with_env(LLM_API_KEY="AIzaSyABC-def_123")
         self.assertTrue(c.is_gemini)
         self.assertEqual(c.api_key, "AIzaSyABC-def_123")
         self.assertEqual(c.base_url, "https://generativelanguage.googleapis.com/v1beta/openai")
-        self.assertEqual(c.model, "gemini-3.8-flash")
+        self.assertEqual(c.model, "gemini-3.5-flash-lite")
 
     def test_legacy_gemini_models_are_remapped_to_latest(self):
         """구버전 모델명(1.5/2.5/2.0) 명시 시 최신 모델로 자동 치환 (안전장치)."""
         for legacy in ("gemini-1.5-flash", "gemini-2.5-flash", "gemini-2.0-flash"):
             c = self._client_with_env(GEMINI_API_KEY="AIzaSyTest123", LLM_MODEL=legacy)
             self.assertTrue(c.is_gemini)
-            self.assertEqual(c.model, "gemini-3.8-flash")
+            self.assertEqual(c.model, "gemini-3.5-flash-lite")
 
     def test_gemini_404_falls_back_to_supported_model(self):
         """호출 중 404(모델 미지원) → 경량 폴백 모델로 한 번 재시도 후 성공."""
@@ -302,6 +302,7 @@ class TestLLMGeminiDetection(unittest.TestCase):
                  ("GEMINI_API_KEY", "LLM_API_KEY", "OPENAI_API_KEY", "LLM_BASE_URL", "LLM_MODEL")}
         try:
             os.environ["GEMINI_API_KEY"] = "AIzaSyTest123"
+            os.environ["LLM_MODEL"] = "gemini-3.8-flash"  # 폴백 경로 검증용: 무거운 모델 명시
             from core.llm import LLMClient
             c = LLMClient()
             self.assertEqual(c.model, "gemini-3.8-flash")
@@ -368,7 +369,8 @@ class TestLLMGeminiDetection(unittest.TestCase):
             self.assertIsNone(out)
             self.assertIsNotNone(c.last_error)
             self.assertIn("404", c.last_error)
-            # 폴백 후보는 1회(gemini-3.5-flash-lite)뿐 → 이후 남은 재시도 1회에서 sleep
+            # 폴백 후보(gemini-3.5-flash-lite)가 기본 모델과 같아 추가 폴백은 없음
+            # → 남은 일반 재시도 1회에서 sleep
             self.assertEqual(m_sleep.call_count, 1)
         finally:
             for k, v in saved.items():
@@ -447,6 +449,151 @@ class TestAgentChain(unittest.TestCase):
         price = self.data.last_close
         stop_val = float(dec["stop"].split("(")[0].replace("$", "").replace(",", "").strip())
         self.assertLess(stop_val, price)
+
+
+class TestSSEKeepaliveAndFastModel(unittest.TestCase):
+    """SSE 킵얼라이브(Render/Cloudflare 100초 유휴 타임아웃 방지)와
+    고속 기본 모델(gemini-3.5-flash-lite) 전환에 대한 오프라인 테스트."""
+
+    def test_default_gemini_timeout_is_25s(self):
+        import os
+        from core.llm import LLMClient
+        saved = os.environ.pop("LLM_TIMEOUT", None)
+        saved_model = os.environ.pop("LLM_MODEL", None)
+        try:
+            c = LLMClient()
+            self.assertEqual(c.timeout, 25.0)
+        finally:
+            if saved is not None:
+                os.environ["LLM_TIMEOUT"] = saved
+            if saved_model is not None:
+                os.environ["LLM_MODEL"] = saved_model
+
+    def test_thinking_model_bumps_max_tokens_and_sets_low_effort(self):
+        """gemini-3.8-flash 명시 사용 시 Thinking 토큰 잠식 방지 안전장치."""
+        import os
+        from unittest import mock
+        from core.llm import LLMClient
+        saved = {k: os.environ.pop(k, None)
+                 for k in ("GEMINI_API_KEY", "LLM_API_KEY", "OPENAI_API_KEY", "LLM_MODEL")}
+        try:
+            os.environ["GEMINI_API_KEY"] = "AIzaSyTest123"
+            os.environ["LLM_MODEL"] = "gemini-3.8-flash"
+            c = LLMClient()
+            captured = {}
+
+            class FakeResp:
+                status_code = 200
+                def raise_for_status(self): pass
+                def json(self):
+                    return {"choices": [{"message": {"content": "ok"}}]}
+
+            def fake_post(url, json=None, headers=None, timeout=None):
+                captured["payload"] = json
+                return FakeResp()
+
+            with mock.patch("core.llm.requests.post", side_effect=fake_post):
+                out = c.chat("sys", "user", max_tokens=700)  # 기존 기본값(700) 그대로 호출
+            self.assertEqual(out, "ok")
+            self.assertGreaterEqual(captured["payload"]["max_tokens"], 4096)
+            self.assertEqual(captured["payload"]["reasoning_effort"], "low")
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+    def test_fast_lite_model_keeps_original_max_tokens(self):
+        """기본 경량 모델(3.5-flash-lite)은 호출자의 max_tokens 를 그대로 존중."""
+        import os
+        from unittest import mock
+        from core.llm import LLMClient
+        saved = {k: os.environ.pop(k, None)
+                 for k in ("GEMINI_API_KEY", "LLM_API_KEY", "OPENAI_API_KEY", "LLM_MODEL")}
+        try:
+            os.environ["GEMINI_API_KEY"] = "AIzaSyTest123"
+            c = LLMClient()
+            captured = {}
+
+            class FakeResp:
+                status_code = 200
+                def raise_for_status(self): pass
+                def json(self):
+                    return {"choices": [{"message": {"content": "ok"}}]}
+
+            def fake_post(url, json=None, headers=None, timeout=None):
+                captured["payload"] = json
+                return FakeResp()
+
+            with mock.patch("core.llm.requests.post", side_effect=fake_post):
+                c.chat("sys", "user", max_tokens=700)
+            self.assertEqual(captured["payload"]["max_tokens"], 700)
+            self.assertNotIn("reasoning_effort", captured["payload"])
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+    def test_retry_is_two_attempts_with_short_wait(self):
+        """재시도 총 2회(attempt in range(2)), 대기 1.0초 — 최악에도 빠른 폴백."""
+        import os
+        from unittest import mock
+        from core.llm import LLMClient
+        saved = {k: os.environ.pop(k, None)
+                 for k in ("GEMINI_API_KEY", "LLM_API_KEY", "OPENAI_API_KEY", "LLM_MODEL")}
+        try:
+            os.environ["LLM_API_KEY"] = "sk-test"
+            c = LLMClient()
+            err = ConnectionError("boom")
+            with mock.patch("core.llm.requests.post", side_effect=err) as m_post, \
+                 mock.patch("core.llm.time.sleep") as m_sleep:
+                out = c.chat("sys", "user")
+            self.assertIsNone(out)
+            self.assertEqual(m_post.call_count, 2)   # 시도 총 2회
+            self.assertEqual(m_sleep.call_count, 1)  # 시도 사이 1회 대기
+            m_sleep.assert_called_once_with(1.0)
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+    def test_sse_stream_sends_keepalive_and_headers(self):
+        """큐가 비어도 keepalive 주석을 흘려보내고, 프록시 방지 헤더를 보낸다."""
+        import queue as queue_mod
+        from types import SimpleNamespace
+        from unittest import mock
+        from fastapi.testclient import TestClient
+        import app as app_module
+
+        class KeepaliveTestQueue(queue_mod.Queue):
+            """첫 get 은 타임아웃(Empty) → keepalive 경로, 이후엔 정상 동작."""
+            def get(self, *a, **k):
+                if not getattr(self, "_keepalive_tested", False):
+                    self._keepalive_tested = True
+                    raise queue_mod.Empty()
+                return super().get(*a, **k)
+
+        def fake_pipeline(symbol, emit):
+            emit({"type": "log", "stage": "data", "message": "테스트 로그"})
+            emit({"type": "end"})
+
+        # app.py 가 임포트한 queue 모듈 자리에 테스트용 큐 클래스만 갈아끼운다.
+        fake_queue_mod = SimpleNamespace(Queue=KeepaliveTestQueue, Empty=queue_mod.Empty)
+        client = TestClient(app_module.app)
+        with mock.patch("app.run_pipeline", side_effect=fake_pipeline), \
+             mock.patch.object(app_module, "queue", fake_queue_mod):
+            with client.stream("GET", "/api/analyze/stream?symbol=AAPL") as resp:
+                self.assertEqual(resp.headers.get("x-accel-buffering"), "no")
+                self.assertIn("no-transform", resp.headers.get("cache-control", ""))
+                body = b"".join(resp.iter_raw()).decode("utf-8")
+        self.assertIn(": keepalive\n\n", body)
+        self.assertIn("event: log", body)
+        self.assertIn("테스트 로그", body)
 
 
 if __name__ == "__main__":

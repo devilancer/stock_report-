@@ -29,7 +29,7 @@
 export LLM_API_KEY=sk-...                 # 또는 OPENAI_API_KEY
 export LLM_MODEL=gpt-4o-mini              # 기본값
 export LLM_BASE_URL=https://api.openai.com/v1   # OpenAI 호환 엔드포인트 (로컬/다른 벤더 가능)
-export LLM_TIMEOUT=45
+export LLM_TIMEOUT=25
 bash run_server.sh restart
 ```
 
@@ -48,8 +48,12 @@ bash run_server.sh restart
 - `GEMINI_API_KEY`가 있거나 `LLM_API_KEY`가 `AIza`로 시작하면 자동으로 Gemini(공식 OpenAI 호환
   엔드포인트)를 사용합니다.
 - 자동 구성값: `LLM_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai`,
-  `LLM_MODEL=gemini-3.8-flash` (구버전 `gemini-1.5-flash` / `gemini-2.5-flash` / `gemini-2.0-flash` 는
-  자동 치환 및 404 폴백 지원 — 폴백 모델은 경량용 `gemini-3.5-flash-lite`)
+  `LLM_MODEL=gemini-3.5-flash-lite` (초고속 경량 모델 — 기본 Thinking minimal, 1~2초 내 응답.
+  구버전 `gemini-1.5-flash` / `gemini-2.5-flash` / `gemini-2.0-flash` 는
+  자동 치환 및 404 폴백 지원)
+- `gemini-3.8-flash` 도 지원 (Thinking 모델): 명시적으로 지정하면 Thinking 토큰이 출력 한도를
+  잠식하지 않도록 `max_tokens`를 자동으로 4096 이상으로 올리고 `reasoning_effort: low` 를 적용합니다.
+  다만 응답이 수십 초 걸릴 수 있어 웹 실시간 응답에는 `gemini-3.5-flash-lite` 기본값을 권장합니다.
 - `LLM_BASE_URL` / `LLM_MODEL`을 직접 설정하면 그 값이 우선합니다.
 
 ## 지원 시장

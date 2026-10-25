@@ -85,8 +85,14 @@
       finish();
     });
     es.addEventListener("error", (e) => {
-      const d = JSON.parse(e.data || "{}");
-      log("error", d.message || "알 수 없는 오류가 발생했습니다.");
+      let d = {};
+      try { d = JSON.parse(e.data || "{}"); } catch (_) { /* 빈/불완전 data 무시 */ }
+      // e.data 가 없으면 브라우저 네트워크 단절(프록시 타임아웃 등) — 서버 에러 이벤트가 아님
+      const networkDrop = !e.data;
+      log("error", d.message
+        || (networkDrop
+          ? "서버와의 연결이 끊겼습니다. 잠시 후 다시 시도해 주세요."
+          : "알 수 없는 오류가 발생했습니다."));
       $("#log-state").textContent = "error";
       $("#analyze-btn").disabled = false;
       $$(".stage.is-running").forEach((el) => {
