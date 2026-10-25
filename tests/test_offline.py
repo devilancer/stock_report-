@@ -274,14 +274,67 @@ class TestLLMGeminiDetection(unittest.TestCase):
         self.assertTrue(c.is_gemini)
         self.assertEqual(c.api_key, "AIzaSyTest123")
         self.assertEqual(c.base_url, "https://generativelanguage.googleapis.com/v1beta/openai")
-        self.assertEqual(c.model, "gemini-1.5-flash")
+        self.assertEqual(c.model, "gemini-2.5-flash")
 
     def test_llm_key_with_aiza_prefix_detected_as_gemini(self):
         c = self._client_with_env(LLM_API_KEY="AIzaSyABC-def_123")
         self.assertTrue(c.is_gemini)
         self.assertEqual(c.api_key, "AIzaSyABC-def_123")
         self.assertEqual(c.base_url, "https://generativelanguage.googleapis.com/v1beta/openai")
-        self.assertEqual(c.model, "gemini-1.5-flash")
+        self.assertEqual(c.model, "gemini-2.5-flash")
+
+    def test_legacy_gemini_model_is_remapped_to_latest(self):
+        """구버전 gemini-1.5-flash 명시 시 최신 모델로 자동 치환 (안전장치)."""
+        c = self._client_with_env(GEMINI_API_KEY="AIzaSyTest123", LLM_MODEL="gemini-1.5-flash")
+        self.assertTrue(c.is_gemini)
+        self.assertEqual(c.model, "gemini-2.5-flash")
+
+    def test_gemini_404_falls_back_to_supported_model(self):
+        """호출 중 404(모델 미지원) → 지원 모델로 한 번 폴백 재시도 후 성공."""
+        import json as _json
+        import os
+        from unittest import mock
+
+        import requests as _requests
+
+        saved = {k: os.environ.pop(k, None) for k in
+                 ("GEMINI_API_KEY", "LLM_API_KEY", "OPENAI_API_KEY", "LLM_BASE_URL", "LLM_MODEL")}
+        try:
+            os.environ["GEMINI_API_KEY"] = "AIzaSyTest123"
+            from core.llm import LLMClient
+            c = LLMClient()
+            self.assertEqual(c.model, "gemini-2.5-flash")
+
+            def fake_post(url, **kwargs):
+                sent_model = kwargs["json"]["model"]
+                if sent_model == "gemini-2.5-flash":
+                    resp = mock.Mock()
+                    resp.status_code = 404
+                    resp.text = _json.dumps({
+                        "error": {"code": 404, "message":
+                                  "models/gemini-2.5-flash is not found for API version v1beta"}
+                    })
+                    raise _requests.HTTPError(response=resp)
+                ok = mock.Mock()
+                ok.status_code = 200
+                ok.json.return_value = {
+                    "choices": [{"message": {"content": f"ok:{sent_model}"}}]
+                }
+                return ok
+
+            with mock.patch.object(_requests, "post", side_effect=fake_post), \
+                 mock.patch("core.llm.time.sleep") as m_sleep:
+                out = c.chat("sys", "user")
+            self.assertEqual(out, "ok:gemini-2.0-flash")  # 폴백 후보 중 2.5 제외 → 2.0
+            self.assertEqual(c.model, "gemini-2.0-flash")  # 성공 모델로 유지
+            self.assertIsNone(c.last_error)
+            m_sleep.assert_not_called()  # 폴백은 즉시 재시도 (sleep 없음)
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
     def test_explicit_base_url_and_model_win_over_gemini_defaults(self):
         c = self._client_with_env(
