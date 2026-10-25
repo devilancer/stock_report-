@@ -48,7 +48,7 @@ bash run_server.sh restart
 - `GEMINI_API_KEY`가 있거나 `LLM_API_KEY`가 `AIza`로 시작하면 자동으로 Gemini(공식 OpenAI 호환
   엔드포인트)를 사용합니다.
 - 자동 구성값: `LLM_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai`,
-  `LLM_MODEL=gemini-1.5-flash`
+  `LLM_MODEL=gemini-2.5-flash` (구버전 `gemini-1.5-flash` 는 자동 치환 및 404 폴백 지원)
 - `LLM_BASE_URL` / `LLM_MODEL`을 직접 설정하면 그 값이 우선합니다.
 
 ## 지원 시장
