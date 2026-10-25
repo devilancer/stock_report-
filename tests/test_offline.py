@@ -564,11 +564,12 @@ class TestSSEKeepaliveAndFastModel(unittest.TestCase):
 
     def test_sse_stream_sends_keepalive_and_headers(self):
         """큐가 비어도 keepalive 주석을 흘려보내고, 프록시 방지 헤더를 보낸다."""
+        import asyncio
         import queue as queue_mod
         from types import SimpleNamespace
         from unittest import mock
-        from fastapi.testclient import TestClient
         import app as app_module
+        from fastapi.responses import StreamingResponse
 
         class KeepaliveTestQueue(queue_mod.Queue):
             """첫 get 은 타임아웃(Empty) → keepalive 경로, 이후엔 정상 동작."""
@@ -584,13 +585,21 @@ class TestSSEKeepaliveAndFastModel(unittest.TestCase):
 
         # app.py 가 임포트한 queue 모듈 자리에 테스트용 큐 클래스만 갈아끼운다.
         fake_queue_mod = SimpleNamespace(Queue=KeepaliveTestQueue, Empty=queue_mod.Empty)
-        client = TestClient(app_module.app)
         with mock.patch("app.run_pipeline", side_effect=fake_pipeline), \
              mock.patch.object(app_module, "queue", fake_queue_mod):
-            with client.stream("GET", "/api/analyze/stream?symbol=AAPL") as resp:
-                self.assertEqual(resp.headers.get("x-accel-buffering"), "no")
-                self.assertIn("no-transform", resp.headers.get("cache-control", ""))
-                body = b"".join(resp.iter_raw()).decode("utf-8")
+            resp = app_module.analyze_stream(symbol="AAPL")
+            self.assertIsInstance(resp, StreamingResponse)
+            self.assertEqual(resp.headers.get("x-accel-buffering"), "no")
+            self.assertIn("no-transform", resp.headers.get("cache-control", ""))
+
+            # TestClient/httpx 의존성 없이 body_iterator 를 직접 소비한다.
+            async def _collect() -> str:
+                chunks = []
+                async for chunk in resp.body_iterator:
+                    chunks.append(chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk)
+                return "".join(chunks)
+
+            body = asyncio.run(_collect())
         self.assertIn(": keepalive\n\n", body)
         self.assertIn("event: log", body)
         self.assertIn("테스트 로그", body)
