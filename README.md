@@ -36,6 +36,21 @@ bash run_server.sh restart
 - 보고서/노트에 코멘티 소스 배지(`LLM 코멘티` / `규칙 기반 코멘티`)가 표시됩니다.
 - OpenAI 호환 API라면 누구나 연동 가능: OpenAI, Azure, vLLM, Ollama(`/v1`), LM Studio 등.
 
+### Google Gemini 사용
+
+`GEMINI_API_KEY`만 설정하면 끝입니다 — Gemini 엔드포인트와 기본 모델이 자동 구성됩니다.
+
+```bash
+export GEMINI_API_KEY=AIza...             # https://aistudio.google.com/apikey
+bash run_server.sh restart
+```
+
+- `GEMINI_API_KEY`가 있거나 `LLM_API_KEY`가 `AIza`로 시작하면 자동으로 Gemini(공식 OpenAI 호환
+  엔드포인트)를 사용합니다.
+- 자동 구성값: `LLM_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai`,
+  `LLM_MODEL=gemini-1.5-flash`
+- `LLM_BASE_URL` / `LLM_MODEL`을 직접 설정하면 그 값이 우선합니다.
+
 ## 지원 시장
 
 - 미국: `AAPL`, `NVDA` (Yahoo Finance)
