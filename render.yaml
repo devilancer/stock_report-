@@ -2,12 +2,14 @@ services:
   - type: web
     name: stock-desk
     runtime: docker
-    plan: starter
+    plan: free
     healthCheckPath: /api/health
     envVars:
+      - key: GEMINI_API_KEY
+        sync: false          # Render 대시보드에서 직접 입력
       - key: LLM_API_KEY
-        sync: false
+        sync: false          # 선택: 다른 OpenAI 호환 LLM 사용 시에만 입력
       - key: LLM_MODEL
-        value: gpt-4o-mini
+        value: gemini-1.5-flash
       - key: LLM_BASE_URL
-        value: https://api.openai.com/v1
+        value: https://generativelanguage.googleapis.com/v1beta/openai
