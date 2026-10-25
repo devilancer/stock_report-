@@ -7,14 +7,15 @@
   LLM_API_KEY    API 키 (미설정 시 LLM 비활성 → 규칙 기반 코멘티로 폴백).
                  `AIza` 로 시작하면 Gemini 키로 자동 감지.
   OPENAI_API_KEY LLM_API_KEY 대체 키
-  LLM_MODEL      모델명 (기본 gpt-4o-mini, Gemini 감지 시 gemini-2.5-flash)
+  LLM_MODEL      모델명 (기본 gpt-4o-mini, Gemini 감지 시 gemini-3.8-flash)
   LLM_TIMEOUT    요청 타임아웃 초 (기본 45)
 
 Gemini 자동 감지: GEMINI_API_KEY 가 설정되어 있거나 LLM_API_KEY 가 `AIza` 로
 시작하면 Google Gemini(공식 OpenAI 호환 엔드포인트)로 자동 전환합니다.
 명시적인 LLM_BASE_URL / LLM_MODEL 이 있으면 그 값이 우선합니다.
-구버전 모델명(gemini-1.5-flash)은 자동으로 최신 모델로 치환하며, 호출 시
-HTTP 404(모델 미지원)가 나면 지원 모델로 한 번 폴백 재시도합니다.
+구버전 모델명(gemini-1.5-flash / gemini-2.5-flash / gemini-2.0-flash 등)은
+자동으로 최신 모델로 치환하며, 호출 시 HTTP 404(모델 미지원)가 나면
+경량 폴백 모델(gemini-3.5-flash-lite)로 한 번 폴백 재시도합니다.
 
 설계 원칙: 수치/점수/판단은 결정론적으로 계산하고, LLM은 서술(코멘티)만 생성한다.
 """
@@ -28,11 +29,18 @@ import time
 import requests
 
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
-GEMINI_DEFAULT_MODEL = "gemini-2.5-flash"
+GEMINI_DEFAULT_MODEL = "gemini-3.8-flash"
+GEMINI_FALLBACK_MODEL = "gemini-3.5-flash-lite"
 # v1beta API 에서 제거되어 404를 반환하는 구버전 모델 → 최신 모델로 치환
-_GEMINI_LEGACY_MODELS = {"gemini-1.5-flash": GEMINI_DEFAULT_MODEL}
+# (신규 프로젝트/API 키는 구버전 2.5 모델 접근이 제한됨)
+_GEMINI_LEGACY_MODELS = {
+    "gemini-1.5-flash": GEMINI_DEFAULT_MODEL,
+    "gemini-2.5-flash": GEMINI_DEFAULT_MODEL,
+    "gemini-2.0-flash": GEMINI_DEFAULT_MODEL,
+    "gemini-1.5-flash-lite": GEMINI_FALLBACK_MODEL,
+}
 # 404 (모델 미지원) 발생 시 순서대로 시도하는 폴백 후보
-_GEMINI_FALLBACK_MODELS = ("gemini-2.5-flash", "gemini-2.0-flash")
+_GEMINI_FALLBACK_MODELS = (GEMINI_FALLBACK_MODEL,)
 OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
 OPENAI_DEFAULT_MODEL = "gpt-4o-mini"
 _GEMINI_KEY_PREFIX = "AIza"
