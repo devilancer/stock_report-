@@ -34,14 +34,21 @@ def analyze_stream(symbol: str = Query(..., min_length=1, max_length=20)):
 
         threading.Thread(target=worker, daemon=True).start()
         while True:
-            ev = q.get()
+            try:
+                ev = q.get(timeout=10.0)
+            except queue.Empty:
+                # LLM 처리로 이벤트가 늦어져도 주기적으로 바이트를 흘려보내
+                # Render/Cloudflare 프록시(약 100초 유휴 타임아웃)의 연결 종료를 방지한다.
+                yield ": keepalive\n\n"
+                continue
             if ev.get("type") == "end":
                 break
             name = ev.get("type", "log")
             yield f"event: {name}\ndata: {json.dumps(ev, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(gen(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+                             headers={"Cache-Control": "no-cache, no-transform",
+                                      "X-Accel-Buffering": "no"})
 
 
 @app.get("/api/health")

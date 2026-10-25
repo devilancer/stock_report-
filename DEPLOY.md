@@ -59,7 +59,7 @@ server {
 
 - 무료 플랜: 인스턴스 스펙은 무료 티어 기본값(공유 CPU / 512MB RAM)으로 기동되며, 비활성 시 15분 후 슬립했다가 요청 시 다시 깨어납니다(첫 응답이 약간 느려질 수 있음).
 - `GEMINI_API_KEY` 등록(권장): Render 대시보드에서 서비스 선택 → **Environment** 탭 → `Add Environment Variable` → Key에 `GEMINI_API_KEY`, Value에 [Google AI Studio](https://aistudio.google.com/apikey)에서 발급한 API 키 입력 → **Save Changes** (재배포 자동 실행).
-  - `GEMINI_API_KEY`를 넣으면 `LLM_MODEL`(기본값 `gemini-3.8-flash`)과 `LLM_BASE_URL`(Gemini OpenAI 호환성 엔드포인트)은 `render.yaml` 기본값을 그대로 사용하면 됩니다. `gemini-3.8-flash` 호출이 404로 실패하면 경량 모델 `gemini-3.5-flash-lite`로 자동 폴백합니다.
+  - `GEMINI_API_KEY`를 넣으면 `LLM_MODEL`(기본값 `gemini-3.5-flash-lite`, 초고속 경량 모델)과 `LLM_BASE_URL`(Gemini OpenAI 호환성 엔드포인트)은 `render.yaml` 기본값을 그대로 사용하면 됩니다. 웹 실시간 응답에는 기본값(3.5-flash-lite)을 권장하며, `gemini-3.8-flash`(Thinking 모델)를 쓰면 응답이 수십 초 걸릴 수 있습니다(사용 시 max_tokens 4096+ / reasoning_effort low 자동 적용).
 - `LLM_API_KEY` (선택): Gemini 대신 다른 OpenAI 호환 LLM을 쓸 때만 같은 방법으로 Environment에 등록하세요. 이 경우 `LLM_MODEL`과 `LLM_BASE_URL`도 해당 서비스에 맞게 변경해야 합니다.
 - 두 키 모두 대시보드에서만 입력 가능합니다(`sync: false`) — Blueprint 배포 시 값을 미리 채우지 않습니다.
 

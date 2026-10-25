@@ -7,8 +7,8 @@
   LLM_API_KEY    API 키 (미설정 시 LLM 비활성 → 규칙 기반 코멘티로 폴백).
                  `AIza` 로 시작하면 Gemini 키로 자동 감지.
   OPENAI_API_KEY LLM_API_KEY 대체 키
-  LLM_MODEL      모델명 (기본 gpt-4o-mini, Gemini 감지 시 gemini-3.8-flash)
-  LLM_TIMEOUT    요청 타임아웃 초 (기본 45)
+  LLM_MODEL      모델명 (기본 gpt-4o-mini, Gemini 감지 시 gemini-3.5-flash-lite)
+  LLM_TIMEOUT    요청 타임아웃 초 (기본 25)
 
 Gemini 자동 감지: GEMINI_API_KEY 가 설정되어 있거나 LLM_API_KEY 가 `AIza` 로
 시작하면 Google Gemini(공식 OpenAI 호환 엔드포인트)로 자동 전환합니다.
@@ -16,6 +16,12 @@ Gemini 자동 감지: GEMINI_API_KEY 가 설정되어 있거나 LLM_API_KEY 가 
 구버전 모델명(gemini-1.5-flash / gemini-2.5-flash / gemini-2.0-flash 등)은
 자동으로 최신 모델로 치환하며, 호출 시 HTTP 404(모델 미지원)가 나면
 경량 폴백 모델(gemini-3.5-flash-lite)로 한 번 폴백 재시도합니다.
+
+Gemini 기본 모델은 초고속 경량 모델 `gemini-3.5-flash-lite`(기본 Thinking
+minimal, 1~2초 내 응답)를 권장합니다. Thinking(추론)이 켜져 있는
+`gemini-3.8-flash` 를 명시적으로 사용하면 Thinking 토큰이 출력 한도를
+잠식할 수 있어, max_tokens 를 자동으로 4096 이상으로 올리고
+`reasoning_effort: low` 를 함께 보냅니다.
 
 설계 원칙: 수치/점수/판단은 결정론적으로 계산하고, LLM은 서술(코멘티)만 생성한다.
 """
@@ -29,8 +35,12 @@ import time
 import requests
 
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
-GEMINI_DEFAULT_MODEL = "gemini-3.8-flash"
+GEMINI_DEFAULT_MODEL = "gemini-3.5-flash-lite"
 GEMINI_FALLBACK_MODEL = "gemini-3.5-flash-lite"
+# Thinking(추론)이 기본 활성화된 무거운 모델 — 사용 시 안전장치 적용
+_GEMINI_THINKING_MODELS = ("gemini-3.8-flash",)
+# Thinking 모델은 Thinking 토큰이 max_tokens(출력 한도)를 잠식하므로 최소치 상향
+_THINKING_MIN_TOKENS = 4096
 # v1beta API 에서 제거되어 404를 반환하는 구버전 모델 → 최신 모델로 치환
 # (신규 프로젝트/API 키는 구버전 2.5 모델 접근이 제한됨)
 _GEMINI_LEGACY_MODELS = {
@@ -69,7 +79,7 @@ class LLMClient:
         # 안전장치: 구버전 Gemini 모델명(v1beta 에서 404)이 들어오면 최신 모델로 치환
         if self.is_gemini:
             self.model = _GEMINI_LEGACY_MODELS.get(self.model, self.model)
-        self.timeout = float(os.environ.get("LLM_TIMEOUT", "45"))
+        self.timeout = float(os.environ.get("LLM_TIMEOUT", "25"))
         self.last_error: str | None = None  # 마지막 chat() 실패 사유 (HTTP 상태/본문 등)
 
     @property
@@ -92,10 +102,16 @@ class LLMClient:
         if json_mode:
             # 순수 JSON 응답 강제 (OpenAI 호환 엔드포인트 표준 옵션)
             payload["response_format"] = {"type": "json_object"}
+        if self.is_gemini and self.model in _GEMINI_THINKING_MODELS:
+            # Thinking 모델 안전장치: Thinking 토큰이 출력 한도를 잠식하지 않도록
+            # max_tokens 상향 + 추론량 최소화
+            if payload["max_tokens"] < _THINKING_MIN_TOKENS:
+                payload["max_tokens"] = _THINKING_MIN_TOKENS
+            payload["reasoning_effort"] = "low"
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
         last_err: str | None = None
         fallback_tried = False  # 404 모델 폴백은 요청당 한 번만
-        for attempt in range(3):
+        for attempt in range(2):
             try:
                 r = requests.post(
                     f"{self.base_url}/chat/completions",
@@ -128,8 +144,8 @@ class LLMClient:
                         continue  # 일반 재시도 횟수 소진 없이 즉시 재시도
             except Exception as e:  # 네트워크 오류, 응답 형식 오류 등
                 last_err = f"{type(e).__name__}: {e}"[:150]
-            if attempt < 2:
-                time.sleep(2.0)
+            if attempt < 1:
+                time.sleep(1.0)
         self.last_error = last_err
         return None
 
