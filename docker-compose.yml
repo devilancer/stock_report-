@@ -1,0 +1,21 @@
+services:
+  stock-desk:
+    build: .
+    image: stock-desk:latest
+    container_name: stock-desk
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    # LLM 연동이 필요하면 .env 파일을 만들고 아래 주석을 해제하세요.
+    # env_file:
+    #   - .env
+    environment:
+      # LLM_API_KEY: ${LLM_API_KEY}      # 비밀값은 env_file로 관리하세요
+      LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com/v1}
+      LLM_TIMEOUT: ${LLM_TIMEOUT:-45}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,57 @@
+name: Deploy to VPS
+
+# 시크릿 설정 필요:
+#   SSH_HOST, SSH_USER, SSH_KEY(비공개키 PEM), SMOKE_URL
+# 선택: SSH_PORT(22), DEPLOY_DIR(/srv/stock-desk), SMOKE_SYMBOL(AAPL), LLM_API_KEY
+on:
+  workflow_dispatch:
+    inputs:
+      smoke_symbol:
+        description: "스모크 테스트 종목"
+        required: false
+        default: "AAPL"
+  push:
+    branches: [main]
+
+concurrency:
+  group: deploy-vps
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy on server (git pull + docker compose up)
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_DIR || '/srv/stock-desk' }}
+            git pull --ff-only
+            docker compose up -d --build
+            docker compose ps
+
+      - name: Smoke test (health + full analysis stream)
+        env:
+          SMOKE_URL: ${{ secrets.SMOKE_URL }}
+          SYMBOL: ${{ inputs.smoke_symbol || secrets.SMOKE_SYMBOL || 'AAPL' }}
+        run: bash scripts/smoke_test.sh "$SMOKE_URL" "$SYMBOL"
+
+      - name: Failure diagnostics
+        if: failure()
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          script: |
+            cd ${{ secrets.DEPLOY_DIR || '/srv/stock-desk' }}
+            docker compose logs --tail 80

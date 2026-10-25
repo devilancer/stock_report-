@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stock Desk — AI 리서치 파이프라인</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@400;600;700;900&family=IBM+Plex+Sans+KR:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="masthead">
+  <div class="masthead-rule"></div>
+  <div class="masthead-row">
+    <div class="wordmark">
+      <span class="wordmark-en">STOCK&nbsp;DESK</span>
+      <span class="wordmark-ko">인공지능 리서치 파이프라인 · 큐레이티드 종목 분석</span>
+    </div>
+    <div class="masthead-meta">
+      <span id="edition-date"></span>
+      <span class="dot">·</span>
+      <span>4-AGENT EDITION</span>
+    </div>
+  </div>
+  <div class="masthead-rule thin"></div>
+</header>
+
+<main>
+  <!-- ============ HERO / INPUT ============ -->
+  <section class="hero">
+    <div class="hero-left">
+      <p class="kicker">MULTI-AGENT EQUITY RESEARCH</p>
+      <h1>한 종목,<br>네 개의 두뇌가<br><em>읽어냅니다.</em></h1>
+      <p class="hero-lede">
+        펀더멘털 · 테크니컬 · 시장 리서치 에이전트가 각자의 관점으로 종목을 해체하고,
+        포트폴리오 매니저 에이전트가 세 개의 노트를 종합해
+        <strong>실행 가능한 투자 결정</strong>을 내립니다.
+      </p>
+    </div>
+
+    <div class="hero-right">
+      <form id="analyze-form" class="ticker-form">
+        <label class="ticker-label" for="symbol-input">종목 코드</label>
+        <div class="ticker-line">
+          <input id="symbol-input" name="symbol" type="text" autocomplete="off"
+                 spellcheck="false" placeholder="005930.KS" value="005930.KS">
+          <button type="submit" id="analyze-btn">
+            <span class="btn-label">분석 시작</span>
+            <span class="btn-arrow">→</span>
+          </button>
+        </div>
+        <div class="ticker-hint">
+          미국 <code>AAPL</code> · 한국 <code>005930.KS</code> · 중국 <code>600519</code>
+        </div>
+      </form>
+
+      <div class="presets">
+        <span class="presets-label">빠른 실행</span>
+        <button class="chip" data-symbol="005930.KS">삼성전자</button>
+        <button class="chip" data-symbol="AAPL">애플</button>
+        <button class="chip" data-symbol="NVDA">엔비디아</button>
+        <button class="chip" data-symbol="TSLA">테슬라</button>
+        <button class="chip" data-symbol="600519">귀주모태</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ PIPELINE ============ -->
+  <section class="pipeline-section">
+    <div class="section-head">
+      <h2>리서치 파이프라인</h2>
+      <p class="section-note">각 에이전트는 앞선 단계의 결과를 받아 자신의 노트를 작성합니다.</p>
+    </div>
+
+    <ol class="pipeline" id="pipeline">
+      <li class="stage" data-stage="data">
+        <div class="stage-no">00</div>
+        <div class="stage-body">
+          <h3>데이터 수집</h3>
+          <p>가격 · 재무 · 시장 컨텍스트</p>
+          <div class="stage-status"><span class="status-dot"></span><span class="status-text">대기</span></div>
+        </div>
+      </li>
+      <li class="stage" data-stage="fundamental">
+        <div class="stage-no">01</div>
+        <div class="stage-body">
+          <h3>펀더멘털</h3>
+          <p>가치 · 수익성 · 성장 · 재무</p>
+          <div class="stage-score"></div>
+          <div class="stage-status"><span class="status-dot"></span><span class="status-text">대기</span></div>
+        </div>
+      </li>
+      <li class="stage" data-stage="technical">
+        <div class="stage-no">02</div>
+        <div class="stage-body">
+          <h3>테크니컬</h3>
+          <p>추세 · 모멘텀 · 변동성</p>
+          <div class="stage-score"></div>
+          <div class="stage-status"><span class="status-dot"></span><span class="status-text">대기</span></div>
+        </div>
+      </li>
+      <li class="stage" data-stage="market">
+        <div class="stage-no">03</div>
+        <div class="stage-body">
+          <h3>시장 리서치</h3>
+          <p>레짐 · 상대강도 · 거시</p>
+          <div class="stage-score"></div>
+          <div class="stage-status"><span class="status-dot"></span><span class="status-text">대기</span></div>
+        </div>
+      </li>
+      <li class="stage" data-stage="portfolio">
+        <div class="stage-no">04</div>
+        <div class="stage-body">
+          <h3>포트폴리오 매니저</h3>
+          <p>종합 판단 · 포지션 설계</p>
+          <div class="stage-score"></div>
+          <div class="stage-status"><span class="status-dot"></span><span class="status-text">대기</span></div>
+        </div>
+      </li>
+    </ol>
+
+    <div class="log-strip">
+      <div class="log-head">
+        <span>AGENT LOG</span>
+        <span id="log-state">idle</span>
+      </div>
+      <div class="log-body" id="log-body">
+        <div class="log-line dim">파이프라인 대기 중 — 종목 코드를 입력하고 ‘분석 시작’을 누르세요.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ REPORT ============ -->
+  <section class="report-section" id="report-section" hidden>
+    <div class="section-head">
+      <h2>큐레이티드 리서치 노트</h2>
+      <div class="report-actions">
+        <button class="ghost-btn" id="download-btn">보고서 다운로드 (.md)</button>
+        <button class="ghost-btn" id="reset-btn">새 분석</button>
+      </div>
+    </div>
+
+    <!-- decision cover -->
+    <div class="decision-cover" id="decision-cover"></div>
+
+    <!-- chart -->
+    <div class="chart-block">
+      <div class="chart-head">
+        <h3>가격 흐름 <span class="chart-sub">최근 240거래일 · 종가 / SMA20 / SMA60</span></h3>
+      </div>
+      <div class="chart-wrap" id="chart-wrap"></div>
+    </div>
+
+    <!-- agent notes -->
+    <div class="notes" id="notes"></div>
+
+    <!-- risks -->
+    <div class="risks-block" id="risks-block"></div>
+
+    <p class="disclaimer">
+      본 보고서는 공개 시장 데이터에 정량 규칙 기반 에이전트 체인을 적용해 자동 생성되었습니다.
+      투자 권유가 아니며, 모든 투자 판단과 결과에 대한 책임은 투자자 본인에게 있습니다.
+    </p>
+  </section>
+
+  <!-- ============ EMPTY STATE ============ -->
+  <section class="howto" id="howto">
+    <div class="section-head"><h2>이 앱이 하는 일</h2></div>
+    <ol class="howto-list">
+      <li><strong>수집</strong> — 2년치 일봉, 재무 지표, 시장 지수를 한 번에 긁어옵니다.</li>
+      <li><strong>해체</strong> — 3명의 에이전트가 각각 펀더멘털 / 차트 / 시장 환경을 서로 다른 점수 체계로 채점합니다.</li>
+      <li><strong>종합</strong> — 포트폴리오 매니저가 가중 종합·합의도·변동성을 반영해 매수/매도 판단과 포지션 크기, 손절·목표가를 설계합니다.</li>
+      <li><strong>기록</strong> — 판단 근거가 남은 리서치 노트를 마크다운으로 내려받을 수 있습니다.</li>
+    </ol>
+  </section>
+</main>
+
+<footer class="colophon">
+  <span>STOCK DESK</span>
+  <span class="dot">·</span>
+  <span>DATA: YAHOO FINANCE / AKSHARE</span>
+  <span class="dot">·</span>
+  <span>ENGINE: 4-AGENT RULE-BASED RESEARCH CHAIN</span>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>

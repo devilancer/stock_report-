@@ -1,0 +1,6 @@
+.git
+.env
+.openclaw-run.log
+.server.pid
+__pycache__
+*.pyc
