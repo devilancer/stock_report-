@@ -161,12 +161,19 @@ def _llm_note(key: str, role: str, score: float, stance: str, facts: str,
     user = f"역할: {role}\n종합 점수: {score}/100 · 스탠스: {stance}\n\n분석 팩트:\n{facts}"
     out = llm.complete_json(_LLM_SYSTEM, user)
     if not out or not isinstance(out.get("summary"), str) or not out["summary"].strip():
-        emit({"type": "log", "stage": key, "message": "LLM 응답 파싱 실패 → 규칙 기반 코멘티로 폴백"})
+        if llm.last_error:
+            emit({"type": "log", "stage": key,
+                  "message": f"LLM 호출 실패 ({llm.last_error}) → 규칙 기반 폴백"})
+        else:
+            emit({"type": "log", "stage": key,
+                  "message": "LLM 응답 JSON 파싱 실패 → 규칙 기반 폴백"})
         return None, "rule"
-    bullets = [str(b).strip() for b in (out.get("bullets") or []) if str(b).strip()][:5]
-    risks = [str(r).strip() for r in (out.get("risks") or []) if str(r).strip()][:3]
+    # 키는 소문자로 정규화되어 돌아오지만, 대소문자 혼용 대비 안전 조회
+    summary = out.get("summary") or out.get("Summary") or ""
+    bullets = [str(b).strip() for b in (out.get("bullets") or out.get("Bullets") or []) if str(b).strip()][:5]
+    risks = [str(r).strip() for r in (out.get("risks") or out.get("Risks") or []) if str(r).strip()][:3]
     emit({"type": "log", "stage": key, "message": f"LLM 코멘티 완성 ({llm.model})"})
-    return {"summary": out["summary"].strip(), "bullets": bullets, "risks": risks}, "llm"
+    return {"summary": summary.strip(), "bullets": bullets, "risks": risks}, "llm"
 
 
 # ------------------------------------------------------------------ agents

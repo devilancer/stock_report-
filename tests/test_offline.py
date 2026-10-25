@@ -99,6 +99,144 @@ class TestLLMAdapter(unittest.TestCase):
         self.assertIsNone(extract_json("완전히 다른 텍스트"))
         self.assertIsNone(extract_json('{"summary": "broken", "bullets": ['))
 
+    def test_extract_json_trailing_comma(self):
+        parsed = extract_json('{"summary": "tc", "bullets": ["a",], "risks": [],}')
+        self.assertEqual(parsed["summary"], "tc")
+        self.assertEqual(parsed["bullets"], ["a"])
+
+    def test_extract_json_surrounding_prose(self):
+        text = '다음은 분석 결과입니다:\n```json\n{"Summary": "x", "Bullets": [], "Risks": []}\n```\n추가 설명 텍스트입니다.'
+        parsed = extract_json(text)
+        self.assertEqual(parsed["summary"], "x")
+
+    def test_extract_json_key_case_normalized_to_lower(self):
+        parsed = extract_json('{"Summary": "ok", "Bullets": ["b"], "Risks": ["r"]}')
+        self.assertIn("summary", parsed)
+        self.assertEqual(parsed["summary"], "ok")
+        self.assertEqual(parsed["bullets"], ["b"])
+        self.assertEqual(parsed["risks"], ["r"])
+
+    def test_extract_json_braces_inside_strings(self):
+        text = '참고 {"summary": "JSON은 { 중괄호 } 포함", "bullets": [], "risks": []} 끝'
+        parsed = extract_json(text)
+        self.assertEqual(parsed["summary"], "JSON은 { 중괄호 } 포함")
+
+    def test_api_key_cleaned_of_quotes_and_whitespace(self):
+        import os
+        saved = {}
+        keys = ("GEMINI_API_KEY", "LLM_API_KEY", "OPENAI_API_KEY")
+        for k in keys:
+            saved[k] = os.environ.pop(k, None)
+        try:
+            os.environ["LLM_API_KEY"] = '  "sk-test-key-123" \n'
+            from core.llm import LLMClient
+            c = LLMClient()
+            self.assertEqual(c.api_key, "sk-test-key-123")
+            self.assertFalse(c.is_gemini)
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+    def test_gemini_key_with_quotes_still_detected(self):
+        import os
+        saved = {}
+        keys = ("GEMINI_API_KEY", "LLM_API_KEY", "OPENAI_API_KEY")
+        for k in keys:
+            saved[k] = os.environ.pop(k, None)
+        try:
+            os.environ["GEMINI_API_KEY"] = "' AIzaSyQuoted '"
+            from core.llm import LLMClient
+            c = LLMClient()
+            self.assertTrue(c.is_gemini)
+            self.assertEqual(c.api_key, "AIzaSyQuoted")
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+    def test_chat_records_http_error_in_last_error(self):
+        import os
+        from unittest import mock
+        import requests as requests_mod
+        from core.llm import LLMClient
+
+        saved = {}
+        keys = ("GEMINI_API_KEY", "LLM_API_KEY", "OPENAI_API_KEY")
+        for k in keys:
+            saved[k] = os.environ.pop(k, None)
+        try:
+            os.environ["LLM_API_KEY"] = "sk-test"
+            c = LLMClient()
+            resp = requests_mod.Response()
+            resp.status_code = 401
+            resp._content = b'{"error": {"message": "Invalid API key"}}'
+            err = requests_mod.HTTPError("401 Client Error", response=resp)
+            with mock.patch("core.llm.requests.post", side_effect=err), \
+                 mock.patch("core.llm.time.sleep"):
+                out = c.chat("sys", "user")
+            self.assertIsNone(out)
+            self.assertIsNotNone(c.last_error)
+            self.assertIn("401", c.last_error)
+            self.assertIn("Invalid API key", c.last_error)
+            # complete_json도 실패 사유를 보존하는지 확인
+            c.last_error = None
+            with mock.patch("core.llm.requests.post", side_effect=err), \
+                 mock.patch("core.llm.time.sleep"):
+                parsed = c.complete_json("sys", "user")
+            self.assertIsNone(parsed)
+            self.assertIn("401", c.last_error)
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+    def test_chat_sends_json_mode_response_format(self):
+        import os
+        from unittest import mock
+        from core.llm import LLMClient
+
+        saved = {}
+        keys = ("GEMINI_API_KEY", "LLM_API_KEY", "OPENAI_API_KEY")
+        for k in keys:
+            saved[k] = os.environ.pop(k, None)
+        try:
+            os.environ["LLM_API_KEY"] = "sk-test"
+            c = LLMClient()
+            captured = {}
+
+            class FakeResp:
+                status_code = 200
+                def raise_for_status(self):
+                    pass
+                def json(self):
+                    return {"choices": [{"message": {"content": '{"summary": "ok"}'}}]}
+
+            def fake_post(url, json=None, headers=None, timeout=None):
+                captured["payload"] = json
+                return FakeResp()
+
+            with mock.patch("core.llm.requests.post", side_effect=fake_post):
+                plain = c.chat("sys", "user")
+            self.assertNotIn("response_format", captured["payload"])
+            with mock.patch("core.llm.requests.post", side_effect=fake_post):
+                parsed = c.complete_json("sys", "user")
+            self.assertEqual(captured["payload"].get("response_format"), {"type": "json_object"})
+            self.assertEqual(parsed["summary"], "ok")
+            self.assertIsNone(c.last_error)
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
     def test_llm_disabled_falls_back_to_rule(self):
         import os
         os.environ.pop("LLM_API_KEY", None)
