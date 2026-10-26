@@ -21,7 +21,9 @@ from core.agents import (                             # noqa: E402
     TechnicalAgent,
     _llm_note,
 )
-from core.data import DataCollector, StockData, detect_market, normalize_symbol  # noqa: E402
+from core.data import (                     # noqa: E402
+    DataCollector, StockData, detect_market, kr_code6, normalize_symbol, route_candidates,
+)
 from core.llm import extract_json                     # noqa: E402
 
 
@@ -70,6 +72,27 @@ class TestSymbolRouting(unittest.TestCase):
         self.assertEqual(normalize_symbol("000001"), "000001.SZ")   # 심천
         self.assertEqual(normalize_symbol("900901"), "900901.SS")
         self.assertEqual(normalize_symbol("aapl"), "AAPL")
+
+    def test_kr_code6_extracts_6_digit_code(self):
+        self.assertEqual(kr_code6("005930"), "005930")
+        self.assertEqual(kr_code6("005930.KS"), "005930")
+        self.assertEqual(kr_code6("000660.KQ"), "000660")
+        self.assertIsNone(kr_code6("AAPL"))
+
+    def test_route_candidates_keeps_china_routing(self):
+        """60/68/90으로 시작하는 6자리는 중국으로 확정 — 하위 호환."""
+        self.assertEqual(route_candidates("600519"), [("cn", "600519.SS")])
+        self.assertEqual(route_candidates("688981"), [("cn", "688981.SS")])
+        self.assertEqual(route_candidates("900901"), [("cn", "900901.SS")])
+        self.assertEqual(route_candidates("000660.KQ"), [("kr", "000660.KQ")])
+        self.assertEqual(route_candidates("AAPL"), [("us", "AAPL")])
+
+    def test_route_candidates_falls_back_to_kr_for_ambiguous_codes(self):
+        """005930 같은 6자리 한국 코드는 중국 시도 후 .KS → .KQ 로도 시도."""
+        cands = route_candidates("005930")
+        self.assertEqual(cands[0], ("cn", "005930.SZ"))
+        self.assertIn(("kr", "005930.KS"), cands)
+        self.assertIn(("kr", "005930.KQ"), cands)
 
 
 class TestIndicators(unittest.TestCase):
@@ -589,6 +612,235 @@ class TestFundamentalLogic(unittest.TestCase):
         self.assertAlmostEqual(profile["earnings_growth"], 13.0 / 11.0 - 1)
         self.assertAlmostEqual(profile["roe"], 13.0 / 90.0)
         self.assertAlmostEqual(profile["debt_to_equity"], 45.0 / 90.0 * 100)
+
+
+class TestNaverProfileAndDerivation(unittest.TestCase):
+    """네이버 금융 보완 수집기 및 PER/PBR 역산 Fallback에 대한 오프라인 테스트."""
+
+    def _blank(self):
+        return {k: None for k in (
+            "name", "pe_ttm", "pe_forward", "pb", "dividend_yield", "market_cap",
+        )}
+
+    def _naver_payload(self):
+        return {
+            "stockName": "삼성전자",
+            "totalInfos": [
+                {"code": "marketValue", "key": "시총", "value": "1,248조 1,805억"},
+                {"code": "per", "key": "PER", "value": "9.58배"},
+                {"code": "cnsPer", "key": "추정PER", "value": "4.69배"},
+                {"code": "pbr", "key": "PBR", "value": "2.48배"},
+                {"code": "dividendYieldRatio", "key": "배당수익률", "value": "0.78%"},
+            ],
+        }
+
+    def test_naver_profile_parses_fields(self):
+        from unittest import mock
+
+        resp = mock.Mock(status_code=200)
+        resp.json.return_value = self._naver_payload()
+        with mock.patch("requests.get", return_value=resp) as m_get:
+            out = DataCollector()._fetch_naver_profile("005930", self._blank())
+
+        self.assertEqual(out["name"], "삼성전자")
+        self.assertAlmostEqual(out["pe_ttm"], 9.58)
+        self.assertAlmostEqual(out["pe_forward"], 4.69)
+        self.assertAlmostEqual(out["pb"], 2.48)
+        self.assertAlmostEqual(out["dividend_yield"], 0.0078)  # 0.78% → 비율
+        self.assertAlmostEqual(out["market_cap"], 1_248e12 + 1_805e8)
+        args, kwargs = m_get.call_args
+        self.assertIn("https://m.stock.naver.com/api/stock/005930/integration", args[0])
+        self.assertTrue(str(kwargs["headers"]["User-Agent"]).startswith("Mozilla/5.0"))
+        self.assertEqual(kwargs["timeout"], 4)
+
+    def test_naver_profile_accepts_suffixed_symbol(self):
+        from unittest import mock
+
+        resp = mock.Mock(status_code=200)
+        resp.json.return_value = self._naver_payload()
+        with mock.patch("requests.get", return_value=resp) as m_get:
+            DataCollector()._fetch_naver_profile("005930.KS", self._blank())
+        self.assertIn("/api/stock/005930/", m_get.call_args[0][0])
+
+    def test_naver_profile_does_not_override_existing(self):
+        from unittest import mock
+
+        resp = mock.Mock(status_code=200)
+        resp.json.return_value = self._naver_payload()
+        profile = self._blank()
+        profile.update({"pe_ttm": 5.0, "market_cap": 1e12})
+        with mock.patch("requests.get", return_value=resp):
+            out = DataCollector()._fetch_naver_profile("005930", profile)
+        self.assertNotIn("pe_ttm", out)
+        self.assertNotIn("market_cap", out)
+        self.assertIn("pb", out)
+
+    def test_naver_profile_error_returns_empty(self):
+        from unittest import mock
+
+        with mock.patch("requests.get", side_effect=Exception("boom")):
+            out = DataCollector()._fetch_naver_profile("005930", self._blank())
+        self.assertEqual(out, {})
+
+    def test_naver_profile_garbage_values_skipped(self):
+        from unittest import mock
+
+        payload = {
+            "stockName": "적자종목",
+            "totalInfos": [
+                {"key": "PER", "value": "손실"},
+                {"key": "PBR", "value": "-"},
+            ],
+        }
+        resp = mock.Mock(status_code=200)
+        resp.json.return_value = payload
+        with mock.patch("requests.get", return_value=resp):
+            out = DataCollector()._fetch_naver_profile("005930", self._blank())
+        self.assertEqual(out, {"name": "적자종목"})
+
+    def test_kr_num_and_kr_won_parsing(self):
+        from core.data import _kr_num, _kr_won
+
+        self.assertAlmostEqual(_kr_num("9.58배"), 9.58)
+        self.assertAlmostEqual(_kr_num("0.78%"), 0.78)
+        self.assertAlmostEqual(_kr_num("215,500원"), 215500.0)
+        self.assertIsNone(_kr_num("손실"))
+        self.assertIsNone(_kr_num(None))
+        self.assertAlmostEqual(_kr_won("1,248조 1,805억"), 1_248e12 + 1_805e8)
+        self.assertAlmostEqual(_kr_won("3조 6,377억원"), 3e12 + 6_377e8)
+        self.assertAlmostEqual(_kr_won("980억"), 980e8)
+
+    def test_yf_profile_derives_pe_from_eps(self):
+        """trailingPE 누락 시 주가/trailingEps 로, forwardPE 는 forwardEps 로 역산."""
+        from unittest import mock
+
+        t = mock.Mock()
+        t.info = {"marketCap": 5e11, "trailingEps": 10.0, "forwardEps": 8.0, "bookValue": 50.0}
+        yf = mock.Mock()
+        yf.Ticker.return_value = t
+        prices = pd.DataFrame({"close": [100.0]})
+        out = DataCollector()._fetch_yf_profile(yf, "TEST", prices)
+        self.assertAlmostEqual(out["pe_ttm"], 10.0)
+        self.assertAlmostEqual(out["pe_forward"], 12.5)
+        self.assertAlmostEqual(out["pb"], 2.0)
+
+    def test_yf_profile_keeps_real_pe_over_derivation(self):
+        """trailingPE 가 있으면 EPS 역산으로 덮지 않는다."""
+        from unittest import mock
+
+        t = mock.Mock()
+        t.info = {"trailingPE": 20.0, "trailingEps": 10.0, "priceToBook": 3.0, "bookValue": 40.0}
+        yf = mock.Mock()
+        yf.Ticker.return_value = t
+        prices = pd.DataFrame({"close": [100.0]})
+        out = DataCollector()._fetch_yf_profile(yf, "TEST", prices)
+        self.assertAlmostEqual(out["pe_ttm"], 20.0)
+        self.assertAlmostEqual(out["pb"], 3.0)
+
+    def test_fill_from_statements_pe_from_eps_and_pb_from_equity(self):
+        """EPS 가 있으면 주가/EPS 로 PER 역산(당기순익 기반보다 우선), 시총/자기자본으로 PBR 역산."""
+        from unittest import mock
+
+        dates = pd.DatetimeIndex(["2025-12-31", "2024-12-31"])
+        inc = pd.DataFrame(
+            {"Total Revenue": [130.0, 110.0], "Net Income": [13.0, 11.0], "Diluted EPS": [2.6, 2.2]},
+            index=dates,
+        ).T
+        bs = pd.DataFrame(
+            {"Common Stock Equity": [90.0, 85.0], "Total Debt": [45.0, 40.0]},
+            index=dates,
+        ).T
+        t = mock.Mock()
+        t.income_stmt = inc
+        t.balance_sheet = bs
+        yf = mock.Mock()
+        yf.Ticker.return_value = t
+
+        profile = {"pe_ttm": None, "pb": None, "market_cap": 1_300.0}
+        DataCollector()._fill_from_statements(yf, "TEST", profile, last_price=52.0)
+        self.assertAlmostEqual(profile["pe_ttm"], 52.0 / 2.6)      # EPS 기반 우선
+        self.assertAlmostEqual(profile["pb"], 1_300.0 / 90.0)
+
+    def test_fill_from_statements_pe_from_market_cap_over_net_income(self):
+        """EPS 행이 없으면 시총/당기순이익으로 PER 역산."""
+        from unittest import mock
+
+        dates = pd.DatetimeIndex(["2025-12-31", "2024-12-31"])
+        inc = pd.DataFrame({"Total Revenue": [130.0, 110.0], "Net Income": [13.0, 11.0]}, index=dates).T
+        bs = pd.DataFrame({"Common Stock Equity": [90.0, 85.0]}, index=dates).T
+        t = mock.Mock()
+        t.income_stmt = inc
+        t.balance_sheet = bs
+        yf = mock.Mock()
+        yf.Ticker.return_value = t
+
+        profile = {"pe_ttm": None, "pb": None, "market_cap": 1_300.0}
+        DataCollector()._fill_from_statements(yf, "TEST", profile, last_price=52.0)
+        self.assertAlmostEqual(profile["pe_ttm"], 1_300.0 / 13.0)
+        self.assertAlmostEqual(profile["pb"], 1_300.0 / 90.0)
+
+    def test_fill_from_statements_keeps_existing_pe(self):
+        """이미 pe_ttm 이 있으면 재무제표 역산으로 덮지 않는다."""
+        from unittest import mock
+
+        dates = pd.DatetimeIndex(["2025-12-31"])
+        inc = pd.DataFrame({"Total Revenue": [130.0], "Net Income": [13.0], "Diluted EPS": [2.6]}, index=dates).T
+        bs = pd.DataFrame({"Common Stock Equity": [90.0]}, index=dates).T
+        t = mock.Mock()
+        t.income_stmt = inc
+        t.balance_sheet = bs
+        yf = mock.Mock()
+        yf.Ticker.return_value = t
+
+        profile = {"pe_ttm": 7.0, "pb": 2.0, "market_cap": 1_300.0}
+        DataCollector()._fill_from_statements(yf, "TEST", profile, last_price=52.0)
+        self.assertAlmostEqual(profile["pe_ttm"], 7.0)
+        self.assertAlmostEqual(profile["pb"], 2.0)
+
+    def test_collect_kr_uses_naver_profile_and_kr_fallback(self):
+        """6자리 bare 코드(한국 종목)도 .KS 폴백으로 수집되고 네이버 프로필로 PER이 채워진다."""
+        import sys
+        import types
+        from unittest import mock
+
+        n = 60
+        df = pd.DataFrame({
+            "open": [100.0] * n, "high": [101.0] * n, "low": [99.0] * n,
+            "close": [100.0] * n, "volume": [1e6] * n,
+        }, index=pd.bdate_range("2025-01-01", periods=n))
+
+        naver_payload = {
+            "stockName": "삼성전자",
+            "totalInfos": [{"key": "PER", "value": "9.58배"}],
+        }
+        naver_resp = mock.Mock(status_code=200)
+        naver_resp.json.return_value = naver_payload
+
+        tkr = mock.Mock()
+        tkr.info = {}
+        tkr.income_stmt = pd.DataFrame()
+        tkr.balance_sheet = pd.DataFrame()
+        fake_yf_mod = types.ModuleType("yfinance")
+        fake_yf_mod.Ticker = mock.Mock(return_value=tkr)
+
+        def fake_history(*a, **k):
+            symbol = k.get("symbol") or next(x for x in a if isinstance(x, str))
+            if symbol == "005930.KS":
+                return df.copy()
+            return None
+
+        with mock.patch.dict(sys.modules, {"yfinance": fake_yf_mod}), \
+             mock.patch.object(DataCollector, "_fetch_history", side_effect=fake_history), \
+             mock.patch.object(DataCollector, "_fetch_akshare_hist", return_value=None), \
+             mock.patch("requests.get", return_value=naver_resp), \
+             mock.patch("time.sleep"):
+            data = DataCollector().collect("005930", emit=lambda e: None)
+
+        self.assertEqual(data.market, "kr")
+        self.assertEqual(data.yahoo_symbol, "005930.KS")
+        self.assertEqual(data.name, "삼성전자")
+        self.assertAlmostEqual(data.profile["pe_ttm"], 9.58)
+        self.assertEqual(data.currency, "KRW")
 
 
 class TestSSEKeepaliveAndFastModel(unittest.TestCase):
