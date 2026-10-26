@@ -2,7 +2,7 @@
 
 Supports:
   - US equities / ETFs      e.g. AAPL, NVDA, SPY
-  - Korean equities         e.g. 005930.KS, 000660.KQ (Yahoo suffix required)
+  - Korean equities         e.g. 005930.KS, 000660.KQ (6-digit bare code도 시도; Naver Finance로 보완)
   - China A-shares          e.g. 600519, 000001 (6-digit code; enriched via akshare)
 
 Everything is normalized into one `StockData` object so downstream agents
@@ -34,6 +34,18 @@ MARKET_PRESETS = {
 }
 
 
+# 중국 A주로 확정 라우팅되는 6자리 프리픽스: 상해 본부 60, 스타마켓 68, 상해 B주 90.
+# 그 외 6자리(00/30/002/1~4 등)는 한국 종목(005930 등)일 수 있어 후보 라우팅에서 보완한다.
+_CN_6DIGIT_PREFIXES = ("60", "68", "90")
+_6DIGIT_RE = re.compile(r"\d{6}")
+
+
+def kr_code6(symbol: str) -> Optional[str]:
+    """'005930', '005930.KS' 등에서 6자리 숫자 종목 코드를 추출한다."""
+    m = _6DIGIT_RE.search(symbol.strip().upper())
+    return m.group(0) if m else None
+
+
 def detect_market(symbol: str) -> str:
     s = symbol.strip().upper()
     if re.fullmatch(r"\d{6}", s):
@@ -49,6 +61,22 @@ def normalize_symbol(symbol: str) -> str:
         # Yahoo convention: Shanghai = .SS, Shenzhen = .SZ
         return s + (".SS" if s[0] in "69" else ".SZ")
     return s
+
+
+def route_candidates(raw: str) -> list[tuple[str, str]]:
+    """한 종목 코드에 대해 시도할 (market, yahoo_symbol) 후보 목록.
+
+    60/68/90으로 시작하는 6자리는 중국으로 확정한다. 그 외 6자리(예: 005930)는
+    중국(.SZ/.SS) 시도 후 실패 시 한국(.KS → .KQ)으로도 시도해 사용자가 bare
+    코드를 입력해도 한국 주식으로 정상 수집되도록 한다.
+    """
+    s = raw.strip().upper()
+    primary = (detect_market(s), normalize_symbol(s))
+    if primary[0] == "cn":
+        code = kr_code6(s)
+        if code and not code.startswith(_CN_6DIGIT_PREFIXES):
+            return [primary, ("kr", code + ".KS"), ("kr", code + ".KQ")]
+    return [primary]
 
 
 @dataclass
@@ -101,6 +129,38 @@ def _safe(v):
         return None
 
 
+def _kr_num(v) -> Optional[float]:
+    """'9.58배' / '0.78%' / '215,500원' 같은 한글 단위 값을 float로 파싱한다."""
+    if v is None:
+        return None
+    s = str(v).strip()
+    if not s or s in ("-", "손실", "N/A"):
+        return None
+    s = s.replace("배", "").replace("%", "").replace("원", "").replace(",", "").strip()
+    try:
+        f = float(s)
+    except ValueError:
+        return None
+    return f if np.isfinite(f) else None
+
+
+def _kr_won(v) -> Optional[float]:
+    """'1,248조 1,805억' / '3조 6,377억원' 같은 시총 표기를 원 단위 float로 파싱한다."""
+    if v is None:
+        return None
+    s = str(v).replace(",", "").strip()
+    total = 0.0
+    found = False
+    for unit, mult in (("조", 1e12), ("억", 1e8), ("만", 1e4)):
+        m = re.search(r"([\d.]+)\s*" + unit, s)
+        if m:
+            total += float(m.group(1)) * mult
+            found = True
+    if not found:
+        return _kr_num(v)
+    return total if np.isfinite(total) else None
+
+
 class DataCollector:
     """Fetches prices, fundamentals and market context for one symbol."""
 
@@ -112,26 +172,36 @@ class DataCollector:
             raise DataError("종목 코드를 입력해 주세요.")
         market = detect_market(raw)
         yahoo_symbol = normalize_symbol(raw)
-        preset = MARKET_PRESETS[market]
 
         issues: list[str] = []
 
         # ---------- price history ----------
-        emit({"type": "log", "stage": "data", "message": f"{yahoo_symbol} 일봉 2년치 수집 중…"})
-        prices = self._fetch_history(yf, yahoo_symbol)
-        if prices is None and market == "cn":
-            emit({"type": "log", "stage": "data", "message": "야후 응답 지연 → akshare로 전환합니다."})
-            prices = self._fetch_akshare_hist(raw)
+        candidates = route_candidates(raw)
+        prices = None
+        used = candidates[0]
+        for idx, (cand_market, cand_symbol) in enumerate(candidates):
+            emit({"type": "log", "stage": "data", "message": f"{cand_symbol} 일봉 2년치 수집 중…"})
+            tries = 4 if idx == 0 else 2
+            prices = self._fetch_history(yf, cand_symbol, tries=tries)
+            if prices is None and cand_market == "cn":
+                emit({"type": "log", "stage": "data", "message": "야후 응답 지연 → akshare로 전환합니다."})
+                prices = self._fetch_akshare_hist(kr_code6(cand_symbol) or cand_symbol, tries=3 if idx == 0 else 1)
+            if prices is not None:
+                used = (cand_market, cand_symbol)
+                break
         if prices is None:
             emit({"type": "log", "stage": "data", "message": "1차 수집 실패 → 소스 재시도(백오프) 후보를 다시 호출합니다."})
-            prices = self._fetch_history(yf, yahoo_symbol)
-            if prices is None and market == "cn":
-                prices = self._fetch_akshare_hist(raw)
+            cand_market, cand_symbol = candidates[0]
+            prices = self._fetch_history(yf, cand_symbol)
+            if prices is None and cand_market == "cn":
+                prices = self._fetch_akshare_hist(kr_code6(cand_symbol) or cand_symbol)
         if prices is None or len(prices) < 40:
             raise DataError(
                 f"'{symbol}' 가격 데이터를 가져오지 못했습니다. "
                 "예: AAPL / 005930.KS / 600519 형태로 입력해 주세요."
             )
+        market, yahoo_symbol = used
+        preset = MARKET_PRESETS[market]
         prices = self._add_ta(prices)
         emit({
             "type": "log", "stage": "data",
@@ -144,7 +214,9 @@ class DataCollector:
         profile.update(self._fetch_yf_profile(yf, yahoo_symbol, prices))
         if market == "cn":
             profile.update(self._fetch_akshare_profile(raw, profile))
-        self._fill_from_statements(yf, yahoo_symbol, profile)
+        elif market == "kr":
+            profile.update(self._fetch_naver_profile(kr_code6(raw) or raw, profile))
+        self._fill_from_statements(yf, yahoo_symbol, profile, last_price=float(prices["close"].iloc[-1]))
         self._derive_from_prices(prices, profile)
         if profile.get("name") is None:
             profile["name"] = raw
@@ -259,15 +331,32 @@ class DataCollector:
             v = _safe(info.get(key))
             return None if v is None else v
 
+        price = _safe(prices["close"].iloc[-1]) if len(prices) else None
+
+        pe_ttm = _safe(info.get("trailingPE"))
+        pe_forward = _safe(info.get("forwardPE"))
+        pb = _safe(info.get("priceToBook"))
+        eps_ttm = _safe(info.get("trailingEps"))
+        eps_forward = _safe(info.get("forwardEps"))
+        bps = _safe(info.get("bookValue"))
+
+        # Yahoo가 trailingPE 등을 비워두는 경우(한국 주식에서 흔함) EPS/BPS로 역산한다.
+        if pe_ttm is None and price is not None and eps_ttm is not None and eps_ttm > 0:
+            pe_ttm = price / eps_ttm
+        if pe_forward is None and price is not None and eps_forward is not None and eps_forward > 0:
+            pe_forward = price / eps_forward
+        if pb is None and price is not None and bps is not None and bps > 0:
+            pb = price / bps
+
         gross = _safe(info.get("grossMargins"))
         return {
             "name": info.get("longName") or info.get("shortName"),
             "sector": info.get("sector"),
             "industry": info.get("industry"),
             "market_cap": _safe(info.get("marketCap")),
-            "pe_ttm": _safe(info.get("trailingPE")),
-            "pe_forward": _safe(info.get("forwardPE")),
-            "pb": _safe(info.get("priceToBook")),
+            "pe_ttm": pe_ttm,
+            "pe_forward": pe_forward,
+            "pb": pb,
             "roe": pct("returnOnEquity"),
             "gross_margin": gross,
             "net_margin": pct("profitMargins"),
@@ -305,7 +394,64 @@ class DataCollector:
         except Exception:
             return {}
 
-    def _fill_from_statements(self, yf, symbol: str, profile: dict[str, Any]) -> None:
+    def _fetch_naver_profile(self, code: str, profile: dict[str, Any]) -> dict[str, Any]:
+        """네이버 금융 모바일 API로 한국 주식 PER/PBR/배당수익률/시총을 보완한다.
+
+        yfinance는 005930.KS 등 한국 종목의 trailingPE를 비워두는 경우가 많아
+        밸류에이션 평가가 누락된다. 여기서 기존 값이 비어 있을 때만 채운다.
+        """
+        import requests
+
+        m = _6DIGIT_RE.search(code.strip().upper())
+        if not m:
+            return {}
+        out: dict[str, Any] = {}
+        try:
+            resp = requests.get(
+                f"https://m.stock.naver.com/api/stock/{m.group(0)}/integration",
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=4,
+            )
+            if resp.status_code != 200:
+                return {}
+            data = resp.json()
+        except Exception:
+            return {}
+        if not isinstance(data, dict):
+            return {}
+
+        name = data.get("stockName")
+        if name:
+            out["name"] = str(name)
+
+        values: dict[str, Any] = {}
+        for item in data.get("totalInfos") or []:
+            if isinstance(item, dict) and item.get("key") is not None:
+                values[str(item["key"])] = item.get("value")
+
+        if profile.get("pe_ttm") is None:
+            v = _kr_num(values.get("PER"))
+            if v is not None:
+                out["pe_ttm"] = v
+        if profile.get("pe_forward") is None:
+            v = _kr_num(values.get("추정PER"))
+            if v is not None:
+                out["pe_forward"] = v
+        if profile.get("pb") is None:
+            v = _kr_num(values.get("PBR"))
+            if v is not None:
+                out["pb"] = v
+        if profile.get("dividend_yield") is None:
+            v = _kr_num(values.get("배당수익률"))
+            if v is not None:
+                out["dividend_yield"] = v / 100  # 0.78% → 0.0078 (비율)
+        if profile.get("market_cap") is None:
+            v = _kr_won(values.get("시총"))
+            if v is not None:
+                out["market_cap"] = v
+        return out
+
+    def _fill_from_statements(self, yf, symbol: str, profile: dict[str, Any], last_price: Optional[float] = None) -> None:
         """Derive growth / profitability / leverage when `info` is thin (common for KR)."""
         try:
             t = yf.Ticker(symbol)
@@ -334,6 +480,20 @@ class DataCollector:
                             profile["net_margin"] = _safe(ni.iloc[-1] / rev.iloc[-1])
                         if profile.get("earnings_growth") is None and len(ni) >= 2 and ni.iloc[-2]:
                             profile["earnings_growth"] = _safe(ni.iloc[-1] / ni.iloc[-2] - 1)
+                # PER 역산: ① 주가 / EPS, ② 시총 / 당기순이익
+                if profile.get("pe_ttm") is None:
+                    for row in ("Diluted EPS", "Basic EPS"):
+                        if row not in inc.index:
+                            continue
+                        eps = inc.loc[row].dropna()
+                        if len(eps) and last_price is not None and _safe(eps.iloc[-1]) and _safe(eps.iloc[-1]) > 0:
+                            profile["pe_ttm"] = _safe(last_price / _safe(eps.iloc[-1]))
+                            break
+                    if profile.get("pe_ttm") is None and "Net Income" in inc.index:
+                        mc = _safe(profile.get("market_cap"))
+                        ni = inc.loc["Net Income"].dropna()
+                        if mc is not None and mc > 0 and len(ni) and _safe(ni.iloc[-1]) and ni.iloc[-1] > 0:
+                            profile["pe_ttm"] = _safe(mc / ni.iloc[-1])
                 if "Gross Profit" in inc.index and "Total Revenue" in inc.index:
                     gp = inc.loc["Gross Profit"].dropna()
                     rev = inc.loc["Total Revenue"].dropna()
@@ -348,6 +508,11 @@ class DataCollector:
                         if len(ni) and eq.iloc[-1]:
                             if profile.get("roe") is None:
                                 profile["roe"] = _safe(ni.iloc[-1] / eq.iloc[-1])
+                    # PBR 역산: 시총 / 자기자본
+                    if profile.get("pb") is None and len(eq):
+                        mc = _safe(profile.get("market_cap"))
+                        if mc is not None and mc > 0 and _safe(eq.iloc[-1]) and eq.iloc[-1] > 0:
+                            profile["pb"] = _safe(mc / eq.iloc[-1])
                     if "Total Debt" in bs.index and len(eq) and eq.iloc[-1]:
                         debt = bs.loc["Total Debt"].dropna()
                         if len(debt) and profile.get("debt_to_equity") is None:
