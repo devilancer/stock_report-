@@ -451,6 +451,146 @@ class TestAgentChain(unittest.TestCase):
         self.assertLess(stop_val, price)
 
 
+class TestFundamentalLogic(unittest.TestCase):
+    """펀더멘털 애널리스트·데이터 수집 로직 수정에 대한 오프라인 테스트."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.emit = staticmethod(lambda e: None)
+
+    def _profile(self, **overrides):
+        base = {
+            "name": "테스트 종목", "sector": "Technology", "industry": "Semiconductors",
+            "market_cap": 5e11, "pe_ttm": 18.5, "pe_forward": 15.2, "pb": 2.4,
+            "roe": 0.16, "gross_margin": 0.45, "net_margin": 0.12,
+            "revenue_growth": 0.14, "earnings_growth": 0.18,
+            "debt_to_equity": 55.0, "dividend_yield": 0.025, "beta": 1.1,
+            "week52_high": 120.0, "week52_low": 80.0,
+        }
+        base.update(overrides)
+        return base
+
+    def _run_fundamental(self, profile):
+        df = pd.DataFrame({
+            "open": [100.0] * 130, "high": [101.0] * 130, "low": [99.0] * 130,
+            "close": [100.0] * 130, "volume": [1_000_000.0] * 130,
+        }, index=pd.bdate_range("2025-01-01", periods=130))
+        df = DataCollector()._add_ta(df)
+        data = StockData(
+            symbol="TEST", yahoo_symbol="TEST", market="us", name="테스트 종목",
+            currency="USD", prices=df, profile=profile, index_prices=df,
+            index_name="S&P 500", vol_index=None, data_issues=[],
+        )
+        return FundamentalAgent().run(data, self.emit)
+
+    def test_dividend_yield_decimal_not_double_scaled(self):
+        """0.025(=2.5%, 소수점 비율)는 다시 100으로 나눠지지 않는다."""
+        note = self._run_fundamental(self._profile(dividend_yield=0.025))
+        m = next(m for m in note["metrics"] if m["label"] == "배당수익률")
+        self.assertIn("2.5%", m["value"])
+
+    def test_dividend_yield_percent_normalized(self):
+        """2.5(=2.5%, 퍼센트 단위)는 100으로 나눠 정규화된다."""
+        note = self._run_fundamental(self._profile(dividend_yield=2.5))
+        m = next(m for m in note["metrics"] if m["label"] == "배당수익률")
+        self.assertIn("2.5%", m["value"])
+
+    def test_dividend_yield_scores_and_labels(self):
+        cases = [
+            (0.04, "고배당 환원"),
+            (0.02, "고배당 환원"),
+            (0.005, "배당 지급"),
+            (0.0, "무배당"),
+        ]
+        for dy, label in cases:
+            note = self._run_fundamental(self._profile(dividend_yield=dy))
+            m = next(m for m in note["metrics"] if m["label"] == "배당수익률")
+            self.assertEqual(m["note"], label, f"dividend_yield={dy}")
+
+    def test_financial_sector_debt_neutral_and_no_risk(self):
+        """금융/은행업 부채비율은 중립(60점) 평가이며 리스크 문구가 붙지 않는다."""
+        for sector, industry in (
+            ("Financial Services", "Banks - Regional"),
+            ("Insurance - Life", "Insurance - Life"),
+            ("금융", "은행"),
+            ("Financial Services", "Capital Markets"),  # 증권
+        ):
+            note = self._run_fundamental(self._profile(
+                sector=sector, industry=industry, debt_to_equity=350.0))
+            m = next(m for m in note["metrics"] if m["label"] == "부채비율")
+            self.assertEqual(m["note"], "금융업 레버리지(예수금 포함 구조)", f"{sector}/{industry}")
+            self.assertFalse(any("부채비율" in r for r in note["risks"]),
+                             f"리스크 문구 없어야 함: {sector}/{industry}")
+
+    def test_non_financial_high_debt_still_penalized(self):
+        """일반 기업 고부채는 기존대로 감점 및 리스크 표시."""
+        note = self._run_fundamental(self._profile(debt_to_equity=300.0))
+        m = next(m for m in note["metrics"] if m["label"] == "부채비율")
+        self.assertEqual(m["tone"], "bad")
+        self.assertTrue(any("부채비율" in r for r in note["risks"]))
+
+    def test_high_growth_per_over_45_buffered(self):
+        """고성장주(매출/이익 성장률 25% 이상) PER>45는 25점이 아닌 44점 완충."""
+        note = self._run_fundamental(self._profile(
+            pe_ttm=60.0, revenue_growth=0.30, earnings_growth=0.05))
+        m = next(m for m in note["metrics"] if m["label"] == "PER (TTM)")
+        self.assertEqual(m["note"], "고성장 프리미엄 감안 완충")
+        note2 = self._run_fundamental(self._profile(
+            pe_ttm=60.0, revenue_growth=0.05, earnings_growth=0.28))
+        m2 = next(m for m in note2["metrics"] if m["label"] == "PER (TTM)")
+        self.assertEqual(m2["note"], "고성장 프리미엄 감안 완충")
+
+    def test_low_growth_per_over_45_severe(self):
+        """저성장 기업 PER>45는 기존대로 25점(하점)."""
+        note = self._run_fundamental(self._profile(
+            pe_ttm=60.0, revenue_growth=0.05, earnings_growth=0.05))
+        m = next(m for m in note["metrics"] if m["label"] == "PER (TTM)")
+        self.assertEqual(m["tone"], "bad")  # 25점 → bad
+
+    def test_high_roe_pbr_over_5_buffered(self):
+        """고ROE(25% 이상) 기업 PBR>5는 32점이 아닌 45점 완충."""
+        note = self._run_fundamental(self._profile(pb=6.5, roe=0.30))
+        m = next(m for m in note["metrics"] if m["label"] == "PBR")
+        self.assertEqual(m["note"], "고ROE 수익성 감안 완충")
+
+    def test_low_roe_pbr_over_5_severe(self):
+        note = self._run_fundamental(self._profile(pb=6.5, roe=0.10))
+        m = next(m for m in note["metrics"] if m["label"] == "PBR")
+        self.assertEqual(m["note"], "자산 대비 높은 프리미엄")
+
+    def test_fill_from_statements_sorts_columns_ascending(self):
+        """yfinance 재무제표 역순 컬럼(최신이 앞)에서도 최근 실적 기준으로 계산한다."""
+        from unittest import mock
+
+        dates_desc = pd.DatetimeIndex(["2025-12-31", "2024-12-31", "2023-12-31"])
+        inc = pd.DataFrame(
+            {"Total Revenue": [130.0, 110.0, 100.0], "Net Income": [13.0, 11.0, 10.0]},
+            index=dates_desc,
+        ).T
+        bs = pd.DataFrame(
+            {"Common Stock Equity": [90.0, 85.0, 80.0], "Total Debt": [45.0, 40.0, 30.0]},
+            index=dates_desc,
+        ).T
+
+        t = mock.Mock()
+        t.income_stmt = inc
+        t.balance_sheet = bs
+        yf = mock.Mock()
+        yf.Ticker.return_value = t
+
+        profile = {k: None for k in (
+            "revenue_growth", "net_margin", "earnings_growth", "gross_margin",
+            "roe", "debt_to_equity",
+        )}
+        DataCollector()._fill_from_statements(yf, "TEST", profile)
+
+        self.assertAlmostEqual(profile["revenue_growth"], 130.0 / 110.0 - 1)
+        self.assertAlmostEqual(profile["net_margin"], 13.0 / 130.0)
+        self.assertAlmostEqual(profile["earnings_growth"], 13.0 / 11.0 - 1)
+        self.assertAlmostEqual(profile["roe"], 13.0 / 90.0)
+        self.assertAlmostEqual(profile["debt_to_equity"], 45.0 / 90.0 * 100)
+
+
 class TestSSEKeepaliveAndFastModel(unittest.TestCase):
     """SSE 킵얼라이브(Render/Cloudflare 100초 유휴 타임아웃 방지)와
     고속 기본 모델(gemini-3.5-flash-lite) 전환에 대한 오프라인 테스트."""
