@@ -193,11 +193,29 @@ class FundamentalAgent:
         risks: list[str] = []
         sc = Score()
 
+        # 성장률 지표는 밸류에이션 완충 판정에도 쓰이므로 먼저 확보한다.
+        rg = p.get("revenue_growth")
+        eg = p.get("earnings_growth")
+        roe = p.get("roe")
+        high_growth = bool((rg is not None and rg >= 0.25) or (eg is not None and eg >= 0.25))
+        high_roe = bool(roe is not None and roe >= 0.25)
+
         # ---- valuation
         pe = p.get("pe_ttm") or p.get("pe_forward")
         if pe is not None and pe > 0:
-            v = 78 if pe < 12 else 66 if pe < 20 else 52 if pe < 30 else 38 if pe < 45 else 25
-            note = "실적 대비 저평가 구간" if v >= 66 else ("성장 프리미엄이 낮은 구간" if v >= 52 else "성장 기대감이 가격에 선반영")
+            if pe < 12:
+                v = 78
+            elif pe < 20:
+                v = 66
+            elif pe < 30:
+                v = 52
+            elif pe < 45:
+                v = 38
+            elif high_growth:
+                v = 44  # 고성장주: 성장 프리미엄을 감안해 PER>45 밸류에이션 감점을 완충
+            else:
+                v = 25
+            note = "실적 대비 저평가 구간" if v >= 66 else ("성장 프리미엄이 낮은 구간" if v >= 52 else ("고성장 프리미엄 감안 완충" if high_growth and v >= 44 else "성장 기대감이 가격에 선반영"))
             metrics.append({"label": "PER (TTM)" if p.get("pe_ttm") else "PER (Fwd)", "value": f"{pe:,.1f}배", "tone": _tone(v), "note": note})
             sc.add(v, 24)
             bullets.append(f"현재 PER은 {pe:,.1f}배로, 밸류에이션 점수는 {v}점입니다.")
@@ -210,11 +228,20 @@ class FundamentalAgent:
 
         pb = p.get("pb")
         if pb is not None and pb > 0:
-            v = 75 if pb < 1.2 else 62 if pb < 2.5 else 48 if pb < 5 else 32
-            metrics.append({"label": "PBR", "value": f"{pb:,.2f}배", "tone": _tone(v), "note": "자산 대비 낮은 프리미엄" if v >= 62 else "자산 대비 높은 프리미엄"})
+            if pb < 1.2:
+                v = 75
+            elif pb < 2.5:
+                v = 62
+            elif pb < 5:
+                v = 48
+            elif high_roe:
+                v = 45  # 고ROE 기업: PBR>5 감점을 ROE 수익성 근거로 완충
+            else:
+                v = 32
+            note = "자산 대비 낮은 프리미엄" if v >= 62 else ("고ROE 수익성 감안 완충" if high_roe and v >= 45 else "자산 대비 높은 프리미엄")
+            metrics.append({"label": "PBR", "value": f"{pb:,.2f}배", "tone": _tone(v), "note": note})
             sc.add(v, 12)
         # ---- profitability
-        roe = p.get("roe")
         if roe is not None:
             v = 82 if roe >= 0.20 else 68 if roe >= 0.12 else 52 if roe >= 0.06 else 34
             metrics.append({"label": "ROE", "value": fmt_pct(roe), "tone": _tone(v), "note": "자본수익성 양호" if v >= 68 else ("자본수익성 보통" if v >= 52 else "자본수익성 취약")})
@@ -226,7 +253,6 @@ class FundamentalAgent:
             metrics.append({"label": "순이익률", "value": fmt_pct(nm), "tone": _tone(v), "note": "마진 구조가 두텁습니다" if v >= 66 else "마진이 얇은 사업 구조"})
             sc.add(v, 10)
         # ---- growth
-        rg = p.get("revenue_growth")
         if rg is not None:
             v = 80 if rg >= 0.25 else 66 if rg >= 0.10 else 52 if rg >= 0.0 else 32
             metrics.append({"label": "매출 성장률", "value": fmt_pct(rg), "tone": _tone(v), "note": "성장 궤도" if v >= 66 else ("성장 정체" if v >= 52 else "매출 역성장")})
@@ -234,25 +260,46 @@ class FundamentalAgent:
             bullets.append(f"매출은 전년 대비 {fmt_pct(abs(rg))} {'증가' if rg >= 0 else '감소'}했습니다.")
             if v < 52:
                 risks.append("매출 성장이 정체 또는 역성장 중입니다.")
-        eg = p.get("earnings_growth")
         if eg is not None:
             v = 80 if eg >= 0.25 else 64 if eg >= 0.08 else 50 if eg >= -0.05 else 30
             metrics.append({"label": "이익 성장률", "value": fmt_pct(eg), "tone": _tone(v), "note": "이익 개선세" if v >= 64 else "이익 둔화 신호"})
             sc.add(v, 12)
         # ---- balance sheet
         de = p.get("debt_to_equity")
+        sector = str(p.get("sector") or "").lower()
+        industry = str(p.get("industry") or "").lower()
+        is_financial = any(k in sector + " " + industry for k in (
+            "financial", "bank", "insurance", "금융", "은행", "증권", "보험",
+        ))
         if de is not None:
-            v = 78 if de < 40 else 64 if de < 90 else 48 if de < 160 else 30
-            metrics.append({"label": "부채비율", "value": f"{de:,.0f}%", "tone": _tone(v), "note": "재무 레버리지 낮음" if v >= 64 else "차입 의존도 확인 필요"})
-            sc.add(v, 12)
-            if v < 48:
-                risks.append("부채비율이 높아 금리·유동성 환경 변화에 민감합니다.")
+            if is_financial:
+                # 금융/은행업은 예수금 등 부채 구조상 부채비율이 구조적으로 높다.
+                # 일반 제조업 잣대로 감점하지 않고 중립 평가로 처리.
+                v = 60
+                metrics.append({"label": "부채비율", "value": f"{de:,.0f}%", "tone": _tone(v), "note": "금융업 레버리지(예수금 포함 구조)"})
+                sc.add(v, 12)
+            else:
+                v = 78 if de < 40 else 64 if de < 90 else 48 if de < 160 else 30
+                metrics.append({"label": "부채비율", "value": f"{de:,.0f}%", "tone": _tone(v), "note": "재무 레버리지 낮음" if v >= 64 else "차입 의존도 확인 필요"})
+                sc.add(v, 12)
+                if v < 48:
+                    risks.append("부채비율이 높아 금리·유동성 환경 변화에 민감합니다.")
         # ---- dividend
         dy = p.get("dividend_yield")
         if dy is not None:
-            dv = dy / 100  # yfinance dividendYield는 % 단위(예: 0.31 = 0.31%)
-            v = 72 if dv >= 0.03 else 60 if dv >= 0.015 else 50
-            metrics.append({"label": "배당수익률", "value": fmt_pct(dv), "tone": _tone(v), "note": "현금흐름 환원 존재" if dv >= 0.015 else "배당 매력 제한적"})
+            # yfinance dividendYield는 보통 소수점 비율(0.025 = 2.5%).
+            # 일부 소스는 퍼센트 값(2.5)을 주므로 0.5 이상일 때만 100으로 나눠 정규화.
+            dv = dy if dy < 0.5 else dy / 100
+            if dv >= 0.035:
+                v = 75
+            elif dv >= 0.018:
+                v = 65
+            elif dv > 0:
+                v = 55
+            else:
+                v = 50
+            note = "고배당 환원" if v >= 65 else ("배당 지급" if v > 50 else "무배당")
+            metrics.append({"label": "배당수익률", "value": fmt_pct(dv), "tone": _tone(v), "note": note})
             sc.add(v, 6)
 
         score = _f(sc.value, 1)

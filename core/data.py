@@ -314,6 +314,12 @@ class DataCollector:
         except Exception:
             return
         try:
+            # yfinance 재무제표 컬럼은 최신 연도가 앞(iloc[0])에 오는 역순이다.
+            # 날짜 오름차순(과거 → 최신)으로 정렬해 iloc[-1]이 항상 최신 실적이도록 보장.
+            if inc is not None and not inc.empty:
+                inc = inc.sort_index(axis=1)
+            if bs is not None and not bs.empty:
+                bs = bs.sort_index(axis=1)
             if inc is not None and not inc.empty:
                 if "Total Revenue" in inc.index:
                     rev = inc.loc["Total Revenue"].dropna()
